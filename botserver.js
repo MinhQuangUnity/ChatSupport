@@ -1,12 +1,22 @@
-{
-  "name": "discord-bot",
-  "version": "1.0.0",
-  "main": "server.js",
-  "scripts": {
-    "start": "node server.js"
-  },
-  "dependencies": {
-    "discord.js": "^14.15.3",
-    "express": "^4.19.2"
+const { Client, GatewayIntentBits } = require("discord.js");
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent
+  ]
+});
+
+client.once("ready", () => {
+  console.log(`Bot đã online với tên ${client.user.tag}`);
+});
+
+client.on("messageCreate", msg => {
+  if (msg.author.bot) return;
+  if (msg.content === "!ping") {
+    msg.reply("pong!");
   }
-}
+});
+
+client.login(process.env.TOKEN);
