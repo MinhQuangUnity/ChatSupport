@@ -13,34 +13,39 @@ const client = new Client({
 
 const MESSAGES_FILE = "./messages.json";
 
+// Nếu chưa có file lưu tin nhắn thì tạo mới
 if (!fs.existsSync(MESSAGES_FILE)) {
   fs.writeFileSync(MESSAGES_FILE, JSON.stringify({}), "utf-8");
 }
 
 function loadData() {
-  return JSON.parse(fs.readFileSync(MESSAGES_FILE, "utf-8"));
+  try {
+    return JSON.parse(fs.readFileSync(MESSAGES_FILE, "utf-8"));
+  } catch (e) {
+    console.error("⚠️ Lỗi đọc file messages.json:", e);
+    return {};
+  }
 }
 
 function saveData(data) {
   fs.writeFileSync(MESSAGES_FILE, JSON.stringify(data, null, 2));
 }
 
-// Lưu tin nhắn và đánh dấu có tin mới
 function saveMessage(playerId, from, text) {
   const data = loadData();
   if (!data[playerId]) data[playerId] = { messages: [], hasNew: false };
-
   data[playerId].messages.push({ from, text, time: new Date().toISOString() });
-  if (from === "admin") data[playerId].hasNew = true; // Đánh dấu có tin mới
+  if (from === "admin") data[playerId].hasNew = true;
   saveData(data);
 }
 
-client.once("clientReady", () => console.log(`🤖 Bot ${client.user.tag} đã sẵn sàng!`));
+client.once("ready", () => {
+  console.log(`🤖 Bot ${client.user.tag} đã sẵn sàng!`);
+});
 
 client.on("messageCreate", async (message) => {
   if (message.author.bot) return;
 
-  // Trường hợp admin reply
   if (message.reference) {
     const repliedMsg = await message.channel.messages.fetch(message.reference.messageId);
     const match = repliedMsg.content.match(/\*\*(.*?)\*\*/);
@@ -53,7 +58,6 @@ client.on("messageCreate", async (message) => {
     }
   }
 
-  // Trường hợp admin gửi theo format ID: message
   if (message.channel.id === process.env.CHANNEL_ID) {
     const [playerId, ...msgParts] = message.content.split(":");
     const text = msgParts.join(":").trim();
@@ -82,21 +86,18 @@ app.post("/sendMessage", async (req, res) => {
   }
 });
 
-// ✅ Lấy toàn bộ tin nhắn
 app.get("/getMessages/:playerId", (req, res) => {
   const { playerId } = req.params;
   const data = loadData();
   res.json(data[playerId]?.messages || []);
 });
 
-// ✅ Kiểm tra có tin mới không
 app.get("/checkNewMessages/:playerId", (req, res) => {
   const { playerId } = req.params;
   const data = loadData();
   res.json({ hasNew: data[playerId]?.hasNew || false });
 });
 
-// ✅ Đánh dấu đã đọc
 app.post("/markMessagesRead", (req, res) => {
   const { playerId } = req.body;
   const data = loadData();
@@ -105,8 +106,12 @@ app.post("/markMessagesRead", (req, res) => {
   res.json({ success: true });
 });
 
+// Route giữ Render sống
+app.get("/", (req, res) => {
+  res.send("✅ Support Chat Bot is running!");
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`🚀 Server is running on port ${PORT}`));
 
 client.login(process.env.DISCORD_TOKEN);
-
