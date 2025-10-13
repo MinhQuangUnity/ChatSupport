@@ -1,9 +1,15 @@
 // bot.js
 import express from "express";
 import cors from "cors";
-import { Client, GatewayIntentBits } from "discord.js";
+import {
+  Client,
+  GatewayIntentBits,
+  ChannelType,
+  PermissionsBitField
+} from "discord.js";
 import dotenv from "dotenv";
 import mongoose from "mongoose";
+import cron from "node-cron";
 
 dotenv.config();
 
@@ -44,41 +50,59 @@ async function pushMessage(playerId, from, text) {
   return Thread.findOneAndUpdate({ playerId }, update, opt).exec();
 }
 
+// ---------- Ticket helpers ----------
+const SUPPORT_CATEGORY_ID = process.env.SUPPORT_CATEGORY_ID; // 📂 Category “Hỗ Trợ”
+const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; // 👮 Role admin có quyền xem
+
+async function getOrCreateTicketChannel(guild, playerId) {
+  const channelName = `ticket-${playerId.toLowerCase()}`;
+  let channel = guild.channels.cache.find(ch => ch.name === channelName);
+
+  if (!channel) {
+    channel = await guild.channels.create({
+      name: channelName,
+      type: ChannelType.GuildText,
+      parent: SUPPORT_CATEGORY_ID,
+      permissionOverwrites: [
+        {
+          id: guild.roles.everyone.id,
+          deny: [PermissionsBitField.Flags.ViewChannel],
+        },
+        {
+          id: ADMIN_ROLE_ID,
+          allow: [
+            PermissionsBitField.Flags.ViewChannel,
+            PermissionsBitField.Flags.SendMessages,
+            PermissionsBitField.Flags.ReadMessageHistory,
+          ],
+        },
+      ],
+    });
+
+    await channel.send(`🎟️ Ticket mới từ **${playerId}**`);
+    console.log(`Tạo ticket mới cho ${playerId}`);
+  }
+  return channel;
+}
+
 // ---------- Discord events ----------
 client.once("ready", () => {
   console.log(`🤖 Bot ${client.user.tag} ready`);
 });
 
-client.on("error", (err) => console.error("Discord client error:", err));
-client.on("shardError", (err) => console.error("Shard error:", err));
-client.on("warn", (msg) => console.warn("Discord warn:", msg));
-
 client.on("messageCreate", async (message) => {
   try {
     if (message.author.bot) return;
 
-    // Case: admin replies to a player message (Reply action)
-    if (message.reference) {
-      const replied = await message.channel.messages.fetch(message.reference.messageId);
-      const match = replied.content.match(/\*\*(.*?)\*\*/); // expects "**playerId**: text"
-      if (match) {
-        const playerId = match[1];
-        const text = message.content.trim();
-        await pushMessage(playerId, "admin", text);
-        console.log(`Admin -> ${playerId}: ${text}`);
-      }
-      return;
-    }
+    // Chỉ xử lý tin nhắn trong category hỗ trợ
+    if (message.channel.parentId === SUPPORT_CATEGORY_ID) {
+      const playerId = message.channel.name.replace("ticket-", "");
+      const text = message.content.trim();
+      if (!text) return;
 
-    // Case: admin types "PLAYERID: message" in support channel
-    if (message.channel.id === process.env.CHANNEL_ID) {
-      const [playerIdRaw, ...parts] = message.content.split(":");
-      const text = parts.join(":").trim();
-      const playerId = (playerIdRaw || "").trim();
-      if (playerId && text) {
-        await pushMessage(playerId, "admin", text);
-        console.log(`Admin -> ${playerId}: ${text}`);
-      }
+      await pushMessage(playerId, "admin", text);
+      console.log(`Admin -> ${playerId}: ${text}`);
+      // TODO: Gửi phản hồi về game qua API nếu cần
     }
   } catch (e) {
     console.error("Error processing messageCreate:", e);
@@ -88,17 +112,18 @@ client.on("messageCreate", async (message) => {
 // ---------- Express endpoints ----------
 app.get("/", (req, res) => res.send("✅ Support Chat Bot is running"));
 
+// 🟢 Game gửi tin nhắn đến server
 app.post("/sendMessage", async (req, res) => {
   try {
     const { playerId, text } = req.body;
     if (!playerId || !text) return res.status(400).json({ error: "playerId and text required" });
 
-    // send to discord channel
-    const channel = await client.channels.fetch(process.env.CHANNEL_ID);
-    await channel.send(`**${playerId}**: ${text}`);
+    const guild = client.guilds.cache.first();
+    const channel = await getOrCreateTicketChannel(guild, playerId);
 
-    // save to DB
+    await channel.send(`💬 **${playerId}**: ${text}`);
     await pushMessage(playerId, "player", text);
+
     return res.json({ success: true });
   } catch (err) {
     console.error("sendMessage error:", err);
@@ -140,20 +165,34 @@ app.post("/markMessagesRead", async (req, res) => {
   }
 });
 
+// ---------- Cron: xóa tin nhắn cũ hơn 7 ngày ----------
+cron.schedule("0 0 * * *", async () => {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+    const threads = await Thread.find({ "messages.time": { $lt: sevenDaysAgo } });
+
+    for (const thread of threads) {
+      thread.messages = thread.messages.filter(m => m.time >= sevenDaysAgo);
+      await thread.save();
+    }
+
+    console.log(`🧹 Cleaned old messages at ${new Date().toLocaleString()}`);
+  } catch (err) {
+    console.error("Error cleaning old messages:", err);
+  }
+});
+
 // ---------- Start server & DB & Discord ----------
 const PORT = process.env.PORT || 3000;
 
 async function start() {
   try {
-    // Connect MongoDB
     if (!process.env.MONGO_URI) throw new Error("MONGO_URI missing");
     await mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
     console.log("✅ Connected to MongoDB");
 
-    // start HTTP server
     app.listen(PORT, () => console.log(`🚀 HTTP server listening on ${PORT}`));
 
-    // small delay, then login Discord
     setTimeout(() => {
       if (!process.env.DISCORD_TOKEN) {
         console.error("DISCORD_TOKEN missing");
@@ -171,28 +210,7 @@ async function start() {
 
 start();
 
-import cron from "node-cron";
-
-// Xóa tin nhắn cũ hơn 7 ngày mỗi ngày lúc 00:00
-cron.schedule("0 0 * * *", async () => {
-  try {
-    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-
-    const threads = await Thread.find({ "messages.time": { $lt: sevenDaysAgo } });
-
-    for (const thread of threads) {
-      // Lọc bỏ các message cũ hơn 7 ngày
-      thread.messages = thread.messages.filter(m => m.time >= sevenDaysAgo);
-      await thread.save();
-    }
-
-    console.log(`🧹 Cleaned old messages at ${new Date().toLocaleString()}`);
-  } catch (err) {
-    console.error("Error cleaning old messages:", err);
-  }
-});
-
-// Graceful shutdown
+// ---------- Graceful shutdown ----------
 process.on("SIGINT", async () => {
   console.log("SIGINT received, shutting down...");
   await mongoose.disconnect();
@@ -205,4 +223,3 @@ process.on("SIGTERM", async () => {
   client.destroy();
   process.exit(0);
 });
-
