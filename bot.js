@@ -39,23 +39,15 @@ const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
 });
 
-// Utility to upsert thread and push message
-async function pushMessage(playerId, from, text) {
-  if (!playerId) return;
-  const update = {
-    $push: { messages: { from, text, time: new Date() } }
-  };
-  if (from === "admin") update.$set = { hasNew: true };
-  const opt = { upsert: true, new: true, setDefaultsOnInsert: true };
-  return Thread.findOneAndUpdate({ playerId }, update, opt).exec();
-}
-
 // ---------- Ticket helpers ----------
 const SUPPORT_CATEGORY_ID = process.env.SUPPORT_CATEGORY_ID; // 📂 Category “Hỗ Trợ”
 const ADMIN_ROLE_ID = process.env.ADMIN_ROLE_ID; // 👮 Role admin có quyền xem
 
+/**
+ * Lấy hoặc tạo ticket channel cho người chơi
+ */
 async function getOrCreateTicketChannel(guild, playerId) {
-  const channelName = `ticket-${playerId.toLowerCase()}`;
+  const channelName = `ticket-${playerId.toLowerCase()}`; // kênh chỉ cần lowercase
   let channel = guild.channels.cache.find(ch => ch.name === channelName);
 
   if (!channel) {
@@ -80,43 +72,71 @@ async function getOrCreateTicketChannel(guild, playerId) {
     });
 
     await channel.send(`🎟️ Ticket mới từ **${playerId}**`);
-    console.log(`Tạo ticket mới cho ${playerId}`);
+    console.log(`📂 Đã tạo ticket mới cho ${playerId}`);
   }
   return channel;
 }
 
+/**
+ * Thêm tin nhắn vào DB
+ */
+async function pushMessage(playerId, from, text) {
+  if (!playerId) return;
+  const update = {
+    $push: { messages: { from, text, time: new Date() } }
+  };
+  if (from === "admin") update.$set = { hasNew: true };
+  const opt = { upsert: true, new: true, setDefaultsOnInsert: true };
+
+  // ⚠️ Không chuyển playerId thành chữ thường — giữ nguyên ID gốc (in hoa)
+  return Thread.findOneAndUpdate({ playerId: playerId }, update, opt).exec();
+}
+
 // ---------- Discord events ----------
 client.once("ready", () => {
-  console.log(`🤖 Bot ${client.user.tag} ready`);
+  console.log(`🤖 Bot ${client.user.tag} sẵn sàng!`);
 });
 
+/**
+ * Xử lý tin nhắn trong kênh Discord
+ */
 client.on("messageCreate", async (message) => {
   try {
     if (message.author.bot) return;
 
-    // Chỉ xử lý tin nhắn trong category hỗ trợ
+    // Chỉ xử lý tin trong category hỗ trợ
     if (message.channel.parentId === SUPPORT_CATEGORY_ID) {
-      const playerId = message.channel.name.replace("ticket-", "");
+      const playerId = message.channel.name.replace("ticket-", "").toUpperCase();
       const text = message.content.trim();
       if (!text) return;
 
+      // Lệnh !close để đóng ticket
+      if (text.startsWith("!close")) {
+        await message.channel.send("✅ Ticket đã được đóng. Kênh sẽ bị xoá sau 5 giây...");
+        setTimeout(() => message.channel.delete().catch(() => {}), 5000);
+        return;
+      }
+
+      // Tin nhắn admin phản hồi
       await pushMessage(playerId, "admin", text);
-      console.log(`Admin -> ${playerId}: ${text}`);
-      // TODO: Gửi phản hồi về game qua API nếu cần
+      console.log(`🟢 Admin -> ${playerId}: ${text}`);
     }
   } catch (e) {
-    console.error("Error processing messageCreate:", e);
+    console.error("❌ Lỗi xử lý messageCreate:", e);
   }
 });
 
 // ---------- Express endpoints ----------
 app.get("/", (req, res) => res.send("✅ Support Chat Bot is running"));
 
-// 🟢 Game gửi tin nhắn đến server
+/**
+ * 🟢 Game gửi tin nhắn đến server
+ */
 app.post("/sendMessage", async (req, res) => {
   try {
     const { playerId, text } = req.body;
-    if (!playerId || !text) return res.status(400).json({ error: "playerId and text required" });
+    if (!playerId || !text)
+      return res.status(400).json({ error: "playerId and text required" });
 
     const guild = client.guilds.cache.first();
     const channel = await getOrCreateTicketChannel(guild, playerId);
@@ -124,17 +144,21 @@ app.post("/sendMessage", async (req, res) => {
     await channel.send(`💬 **${playerId}**: ${text}`);
     await pushMessage(playerId, "player", text);
 
+    console.log(`🟡 Player -> ${playerId}: ${text}`);
     return res.json({ success: true });
   } catch (err) {
-    console.error("sendMessage error:", err);
+    console.error("❌ sendMessage error:", err);
     return res.status(500).json({ error: "send failed" });
   }
 });
 
+/**
+ * 🗂️ Lấy toàn bộ tin nhắn của player
+ */
 app.get("/getMessages/:playerId", async (req, res) => {
   try {
     const { playerId } = req.params;
-    const thread = await Thread.findOne({ playerId }).lean().exec();
+    const thread = await Thread.findOne({ playerId: playerId }).lean().exec();
     return res.json(thread?.messages || []);
   } catch (err) {
     console.error("getMessages error:", err);
@@ -142,10 +166,13 @@ app.get("/getMessages/:playerId", async (req, res) => {
   }
 });
 
+/**
+ * 🔔 Kiểm tra có tin nhắn mới không
+ */
 app.get("/checkNewMessages/:playerId", async (req, res) => {
   try {
     const { playerId } = req.params;
-    const thread = await Thread.findOne({ playerId }).lean().exec();
+    const thread = await Thread.findOne({ playerId: playerId }).lean().exec();
     return res.json({ hasNew: !!thread?.hasNew });
   } catch (err) {
     console.error("checkNewMessages error:", err);
@@ -153,11 +180,15 @@ app.get("/checkNewMessages/:playerId", async (req, res) => {
   }
 });
 
+/**
+ * ✉️ Đánh dấu đã đọc
+ */
 app.post("/markMessagesRead", async (req, res) => {
   try {
     const { playerId } = req.body;
-    if (!playerId) return res.status(400).json({ error: "playerId required" });
-    await Thread.findOneAndUpdate({ playerId }, { $set: { hasNew: false } }).exec();
+    if (!playerId)
+      return res.status(400).json({ error: "playerId required" });
+    await Thread.findOneAndUpdate({ playerId: playerId }, { $set: { hasNew: false } }).exec();
     return res.json({ success: true });
   } catch (err) {
     console.error("markMessagesRead error:", err);
@@ -165,7 +196,7 @@ app.post("/markMessagesRead", async (req, res) => {
   }
 });
 
-// ---------- Cron: xóa tin nhắn cũ hơn 7 ngày ----------
+// ---------- Cron: xoá tin nhắn cũ hơn 7 ngày ----------
 cron.schedule("0 0 * * *", async () => {
   try {
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
@@ -176,7 +207,7 @@ cron.schedule("0 0 * * *", async () => {
       await thread.save();
     }
 
-    console.log(`🧹 Cleaned old messages at ${new Date().toLocaleString()}`);
+    console.log(`🧹 Đã dọn tin nhắn cũ lúc ${new Date().toLocaleString()}`);
   } catch (err) {
     console.error("Error cleaning old messages:", err);
   }
@@ -189,9 +220,9 @@ async function start() {
   try {
     if (!process.env.MONGO_URI) throw new Error("MONGO_URI missing");
     await mongoose.connect(process.env.MONGO_URI, { useNewUrlParser: true, useUnifiedTopology: true });
-    console.log("✅ Connected to MongoDB");
+    console.log("✅ Đã kết nối MongoDB");
 
-    app.listen(PORT, () => console.log(`🚀 HTTP server listening on ${PORT}`));
+    app.listen(PORT, () => console.log(`🚀 HTTP server đang chạy trên cổng ${PORT}`));
 
     setTimeout(() => {
       if (!process.env.DISCORD_TOKEN) {
@@ -217,6 +248,7 @@ process.on("SIGINT", async () => {
   client.destroy();
   process.exit(0);
 });
+
 process.on("SIGTERM", async () => {
   console.log("SIGTERM received, shutting down...");
   await mongoose.disconnect();
