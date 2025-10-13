@@ -171,6 +171,27 @@ async function start() {
 
 start();
 
+import cron from "node-cron";
+
+// Xóa tin nhắn cũ hơn 7 ngày mỗi ngày lúc 00:00
+cron.schedule("0 0 * * *", async () => {
+  try {
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
+
+    const threads = await Thread.find({ "messages.time": { $lt: sevenDaysAgo } });
+
+    for (const thread of threads) {
+      // Lọc bỏ các message cũ hơn 7 ngày
+      thread.messages = thread.messages.filter(m => m.time >= sevenDaysAgo);
+      await thread.save();
+    }
+
+    console.log(`🧹 Cleaned old messages at ${new Date().toLocaleString()}`);
+  } catch (err) {
+    console.error("Error cleaning old messages:", err);
+  }
+});
+
 // Graceful shutdown
 process.on("SIGINT", async () => {
   console.log("SIGINT received, shutting down...");
@@ -184,3 +205,4 @@ process.on("SIGTERM", async () => {
   client.destroy();
   process.exit(0);
 });
+
