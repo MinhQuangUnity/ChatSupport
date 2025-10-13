@@ -112,10 +112,23 @@ client.on("messageCreate", async (message) => {
 
       // Lệnh !close để đóng ticket
       if (text.startsWith("!close")) {
-        await message.channel.send("✅ Ticket đã được đóng. Kênh sẽ bị xoá sau 5 giây...");
-        setTimeout(() => message.channel.delete().catch(() => {}), 5000);
-        return;
-      }
+  // Xác định playerId từ tên channel
+  const playerId = message.channel.name.replace("ticket-", "").toUpperCase();
+
+  await message.channel.send("✅ Ticket đã được đóng. Dữ liệu tin nhắn sẽ bị xóa và kênh sẽ xoá sau 5 giây...");
+
+  // 🗑️ Xóa dữ liệu trong MongoDB
+  try {
+    await Thread.deleteOne({ playerId: playerId });
+    console.log(`🗑️ Đã xóa dữ liệu chat của ${playerId}`);
+  } catch (err) {
+    console.error(`❌ Lỗi khi xóa dữ liệu ${playerId}:`, err);
+  }
+
+  // Xóa kênh sau 5 giây
+  setTimeout(() => message.channel.delete().catch(() => {}), 5000);
+  return;
+}
 
       // Tin nhắn admin phản hồi
       await pushMessage(playerId, "admin", text);
@@ -255,3 +268,4 @@ process.on("SIGTERM", async () => {
   client.destroy();
   process.exit(0);
 });
+
